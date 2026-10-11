@@ -131,7 +131,7 @@ def main():
             for k, v in mem_results:
                 mem_map[k] = v
 
-            lua_mem = re.compile("Result: (\d+)").findall(lua_response)[0]
+            lua_mem = re.compile(r"Result: (\d+)").findall(lua_response)[0]
 
             print("memory_total.value", mem_map["allocated"])
             print("memory_used.value", mem_map["used"])
