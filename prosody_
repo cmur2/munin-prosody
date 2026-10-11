@@ -22,8 +22,63 @@
 
 import sys
 import os
-import telnetlib
+import socket
 import re
+import time
+
+
+class ConsoleConnection:
+    """Buffered plain-TCP console client; not a general Telnet client."""
+
+    def __init__(self, host, port, timeout=5):
+        self.sock = socket.create_connection((host, port), timeout)
+        self.buffer = b""
+        self.timeout = timeout
+
+    def write(self, data):
+        self.sock.settimeout(self.timeout)
+        self.sock.sendall(data)
+
+    def _read(self, marker, timeout):
+        deadline = time.monotonic() + timeout
+
+        while True:
+            if marker is not None:
+                index = self.buffer.find(marker)
+                if index >= 0:
+                    end = index + len(marker)
+                    result, self.buffer = self.buffer[:end], self.buffer[end:]
+                    return result
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Timed out reading the Prosody console")
+
+            self.sock.settimeout(remaining)
+            chunk = self.sock.recv(4096)
+            if not chunk:
+                if marker is not None:
+                    raise EOFError("Console closed before the response marker")
+                result, self.buffer = self.buffer, b""
+                return result
+
+            self.buffer += chunk
+
+    def read_until(self, marker, timeout=5):
+        return self._read(marker, timeout)
+
+    def read_all(self):
+        return self._read(None, self.timeout)
+
+    def close(self):
+        self.sock.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+
 
 def main():
     try:
@@ -48,7 +103,7 @@ def main():
             print("graph_title Prosody Memory Usage")
             print("graph_vlabel Bytes")
             print("graph_category Prosody")
-            print("graph_order memory_total memory_used memory_lua");
+            print("graph_order memory_total memory_used memory_lua")
             print("graph_args --base 1024 -l 0")
 
             print("memory_total.draw AREA")
@@ -62,18 +117,19 @@ def main():
 
         else:
             memstats_re = re.compile(r"\|\s(\w+)\s+(\d+)\s+\|")
-            telnet = telnetlib.Telnet(host, port)
-            telnet.write(b">local pposix = assert(require 'util.pposix'); for k,v in pairs(pposix.meminfo()) do print(k,v, '|') end\n")
-            mem_response = telnet.read_until(b"Result:", 5)
-            mem_response = mem_response.decode('utf-8')
-            telnet.write(b">collectgarbage('count')*1024\n")
-            telnet.write(b"quit\n")
-            lua_response = telnet.read_all()
-            lua_response = lua_response.decode('utf-8')
+            with ConsoleConnection(host, port) as telnet:
+                telnet.write(b">local pposix = assert(require 'util.pposix'); for k,v in pairs(pposix.meminfo()) do print(k,v, '|') end\n")
+                mem_response = telnet.read_until(b"Result:", 5)
+                mem_response = mem_response.decode('utf-8')
+                telnet.write(b">collectgarbage('count')*1024\n")
+                telnet.write(b"quit\n")
+                lua_response = telnet.read_all()
+                lua_response = lua_response.decode('utf-8')
 
             mem_results = memstats_re.findall(mem_response)
             mem_map = {}
-            for k, v in mem_results: mem_map[k] = v
+            for k, v in mem_results:
+                mem_map[k] = v
 
             lua_mem = re.compile("Result: (\d+)").findall(lua_response)[0]
 
@@ -92,15 +148,15 @@ def main():
 
         else:
             connection_count_re = re.compile(r"OK:\s(\d+)\s")
-            telnet = telnetlib.Telnet(host, port)
-            telnet.write(b"c2s:show()\n")
-            telnet_response = telnet.read_until(b"c2s sessions shown", 5)
-            telnet_response = telnet_response.decode('utf-8')
-            parsed_info = connection_count_re.findall(telnet_response)
-            secure_client_connections = int(parsed_info[0])
-            print("secure_client_connections.value %s" % \
-                  (secure_client_connections))
-            telnet.write(b"quit")
+            with ConsoleConnection(host, port) as telnet:
+                telnet.write(b"c2s:show()\n")
+                telnet_response = telnet.read_until(b"c2s sessions shown", 5)
+                telnet_response = telnet_response.decode('utf-8')
+                parsed_info = connection_count_re.findall(telnet_response)
+                secure_client_connections = int(parsed_info[0])
+                print("secure_client_connections.value %s" % (
+                      secure_client_connections))
+                telnet.write(b"quit\n")
 
     elif wildcard == "s2s":
         if mode == "config":
@@ -113,15 +169,15 @@ def main():
 
         else:
             connection_count_re = re.compile(r"OK:\s(\d+)\s")
-            telnet = telnetlib.Telnet(host, port)
-            telnet.write(b"s2s:show()\n")
-            telnet_response = telnet.read_until(b"s2s connections shown", 5)
-            telnet_response = telnet_response.decode('utf-8')
-            parsed_info = connection_count_re.findall(telnet_response)
-            secure_server_connections = int(parsed_info[0])
-            print("secure_server_connections.value %s" % \
-                  (secure_server_connections))
-            telnet.write(b"quit")
+            with ConsoleConnection(host, port) as telnet:
+                telnet.write(b"s2s:show()\n")
+                telnet_response = telnet.read_until(b"s2s connections shown", 5)
+                telnet_response = telnet_response.decode('utf-8')
+                parsed_info = connection_count_re.findall(telnet_response)
+                secure_server_connections = int(parsed_info[0])
+                print("secure_server_connections.value %s" % (
+                      secure_server_connections))
+                telnet.write(b"quit\n")
 
     elif wildcard == "presence":
         if mode == "config":
@@ -138,17 +194,17 @@ def main():
 
         else:
             client_presence_re = re.compile(r"- (.*?)\(\d+\)")
-            telnet = telnetlib.Telnet(host, port)
-            telnet.write(b"c2s:show()\n")
-            telnet_response = telnet.read_until(b"clients", 5)
-            telnet_response = telnet_response.decode('utf-8')
-            parsed_info = client_presence_re.findall(telnet_response)
-            print("available.value %s" % (parsed_info.count("available")))
-            print("chat.value %s" % (parsed_info.count("chat")))
-            print("away.value %s" % (parsed_info.count("away")))
-            print("xa.value %s" % (parsed_info.count("xa")))
-            print("dnd.value %s" % (parsed_info.count("dnd")))
-            telnet.write(b"quit")
+            with ConsoleConnection(host, port) as telnet:
+                telnet.write(b"c2s:show()\n")
+                telnet_response = telnet.read_until(b"clients", 5)
+                telnet_response = telnet_response.decode('utf-8')
+                parsed_info = client_presence_re.findall(telnet_response)
+                print("available.value %s" % (parsed_info.count("available")))
+                print("chat.value %s" % (parsed_info.count("chat")))
+                print("away.value %s" % (parsed_info.count("away")))
+                print("xa.value %s" % (parsed_info.count("xa")))
+                print("dnd.value %s" % (parsed_info.count("dnd")))
+                telnet.write(b"quit\n")
 
     elif wildcard == "uptime":
         if mode == "config":
@@ -167,16 +223,16 @@ def main():
 
         else:
             uptime_re = re.compile(r"\d+")
-            telnet = telnetlib.Telnet(host, port)
-            telnet.write(b"server:uptime()\n")
-            telnet_response = telnet.read_until(b"minutes (", 5)
-            telnet_response = telnet_response.decode('utf-8')
-            parsed_info = uptime_re.findall(telnet_response)
-            uptime_value = float(parsed_info[0]) + \
-                           float(parsed_info[1]) / 24 +\
-                           float(parsed_info[2]) / 60 / 24
-            print("uptime.value %s" % (uptime_value))
-            telnet.write(b"quit")
+            with ConsoleConnection(host, port) as telnet:
+                telnet.write(b"server:uptime()\n")
+                telnet_response = telnet.read_until(b"minutes (", 5)
+                telnet_response = telnet_response.decode('utf-8')
+                parsed_info = uptime_re.findall(telnet_response)
+                uptime_value = float(parsed_info[0]) + \
+                               float(parsed_info[1]) / 24 +\
+                               float(parsed_info[2]) / 60 / 24
+                print("uptime.value %s" % (uptime_value))
+                telnet.write(b"quit\n")
 
     elif wildcard == "users":
         if mode == "config":
@@ -184,34 +240,33 @@ def main():
             print("graph_vlabel users")
             print("graph_category Prosody")
 
-        telnet = telnetlib.Telnet(host, port)
-
-        host_regex = re.compile(r"\S*[\.]*\S*\.\S{1,10}")
-        user_count_regex = re.compile(r"Showing \d+ of (\d+) users")
-        telnet.write(b'>for host, hostsess in pairs(hosts) do '
-                     b'if hostsess.type == "local" then print(host) end '
-                     b'end\n')
-        telnet_response = telnet.read_until(b"Result: nil", 5)
-        telnet_response = telnet_response.decode('utf-8')
-        hosts = host_regex.findall(telnet_response)
-        for host in hosts:
-            if host.startswith('http'):
-                continue
-            munin_var = host.replace(".", "_")
-            if mode == "config":
-                print("%s.label %s" % (munin_var, host))
-            else:
-                user_str = 'user:list("%s","^$")\n' % host
-                user_bytes = str.encode(user_str)
-                telnet.write(user_bytes)
-                telnet_response = telnet.read_until(b"users", 5)
-                telnet_response = telnet_response.decode('utf-8')
-                users = user_count_regex.findall(telnet_response)
-                if len(users) > 0:
-                    print("%s.value %s" % (munin_var, users[0]))
+        with ConsoleConnection(host, port) as telnet:
+            host_regex = re.compile(r"\S*[\.]*\S*\.\S{1,10}")
+            user_count_regex = re.compile(r"Showing \d+ of (\d+) users")
+            telnet.write(b'>for host, hostsess in pairs(hosts) do '
+                         b'if hostsess.type == "local" then print(host) end '
+                         b'end\n')
+            telnet_response = telnet.read_until(b"Result: nil", 5)
+            telnet_response = telnet_response.decode('utf-8')
+            hosts = host_regex.findall(telnet_response)
+            for host in hosts:
+                if host.startswith('http'):
+                    continue
+                munin_var = host.replace(".", "_")
+                if mode == "config":
+                    print("%s.label %s" % (munin_var, host))
                 else:
-                    print("%s.value -1" % (munin_var))
-        telnet.write(b"quit")
+                    user_str = 'user:list("%s","^$")\n' % host
+                    user_bytes = str.encode(user_str)
+                    telnet.write(user_bytes)
+                    telnet_response = telnet.read_until(b"users", 5)
+                    telnet_response = telnet_response.decode('utf-8')
+                    users = user_count_regex.findall(telnet_response)
+                    if len(users) > 0:
+                        print("%s.value %s" % (munin_var, users[0]))
+                    else:
+                        print("%s.value -1" % (munin_var))
+            telnet.write(b"quit\n")
 
 
 def listdirs(folder):
